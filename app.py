@@ -1,19 +1,23 @@
 import os
 import json
 import base64
-import tempfile
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template, send_from_directory
 from flask_cors import CORS
 from pdf2image import convert_from_path
 import requests
 from werkzeug.utils import secure_filename
+from datetime import datetime
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
 
 # Configuration
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
+app.config['UPLOAD_FOLDER'] = 'uploads'
 ALLOWED_EXTENSIONS = {'pdf'}
+
+# Create uploads folder if it doesn't exist
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 # Get API key from environment variable
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
@@ -128,17 +132,8 @@ def extract_pdf_content_with_gemini(image_paths, custom_prompt=None):
 
 @app.route('/', methods=['GET'])
 def index():
-    """API status endpoint"""
-    return jsonify({
-        'status': 'online',
-        'api': 'PDF Content Extraction with Gemini',
-        'version': '1.0',
-        'endpoints': {
-            '/': 'API status (GET)',
-            '/extract': 'Extract PDF content (POST)',
-            '/health': 'Health check (GET)'
-        }
-    })
+    """Serve the web UI"""
+    return render_template('index.html')
 
 @app.route('/health', methods=['GET'])
 def health():
@@ -149,6 +144,87 @@ def health():
         'gemini_api_configured': api_key_set,
         'model': GEMINI_MODEL
     })
+
+@app.route('/list-pdfs', methods=['GET'])
+def list_pdfs():
+    """
+    List all uploaded PDF files
+    
+    Response:
+        JSON array with PDF file information
+    """
+    try:
+        pdfs = []
+        for filename in os.listdir(app.config['UPLOAD_FOLDER']):
+            if filename.endswith('.pdf'):
+                filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+                file_stats = os.stat(filepath)
+                pdfs.append({
+                    'name': filename,
+                    'size': file_stats.st_size,
+                    'modified': datetime.fromtimestamp(file_stats.st_mtime).isoformat()
+                })
+        
+        # Sort by modified time, newest first
+        pdfs.sort(key=lambda x: x['modified'], reverse=True)
+        
+        return jsonify({
+            'success': True,
+            'count': len(pdfs),
+            'pdfs': pdfs
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/extract-saved/<filename>', methods=['POST'])
+def extract_saved_pdf(filename):
+    """
+    Extract content from a previously uploaded PDF
+    
+    Args:
+        filename: Name of the PDF file in uploads folder
+    
+    Response:
+        JSON with extracted data
+    """
+    # Check if API key is configured
+    if not GEMINI_API_KEY:
+        return jsonify({
+            'error': 'Gemini API key not configured. Please set GEMINI_API_KEY environment variable.'
+        }), 500
+    
+    # Sanitize filename
+    filename = secure_filename(filename)
+    pdf_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    
+    # Check if file exists
+    if not os.path.exists(pdf_path):
+        return jsonify({'error': 'PDF file not found'}), 404
+    
+    try:
+        # Create temporary directory for processing
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Convert PDF to images
+            image_folder = os.path.join(temp_dir, 'images')
+            os.makedirs(image_folder, exist_ok=True)
+            image_paths = pdf_to_images(pdf_path, image_folder)
+            
+            # Extract content using Gemini
+            results = extract_pdf_content_with_gemini(image_paths, None)
+            
+            # Return results
+            return jsonify({
+                'success': True,
+                'filename': filename,
+                'total_pages': len(results),
+                'data': results
+            })
+            
+    except Exception as e:
+        return jsonify({
+            'error': f'Processing failed: {str(e)}'
+        }), 500
 
 @app.route('/extract', methods=['POST'])
 def extract_pdf():
@@ -186,13 +262,21 @@ def extract_pdf():
     custom_prompt = request.form.get('prompt', None)
     
     try:
-        # Create temporary directory for processing
+        # Save uploaded PDF permanently
+        filename = secure_filename(file.filename)
+        
+        # Add timestamp if file already exists
+        if os.path.exists(os.path.join(app.config['UPLOAD_FOLDER'], filename)):
+            name, ext = os.path.splitext(filename)
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename = f"{name}_{timestamp}{ext}"
+        
+        pdf_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        file.save(pdf_path)
+        
+        # Create temporary directory for image processing
+        import tempfile
         with tempfile.TemporaryDirectory() as temp_dir:
-            # Save uploaded PDF
-            filename = secure_filename(file.filename)
-            pdf_path = os.path.join(temp_dir, filename)
-            file.save(pdf_path)
-            
             # Convert PDF to images
             image_folder = os.path.join(temp_dir, 'images')
             os.makedirs(image_folder, exist_ok=True)

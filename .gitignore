@@ -11,5 +11,6 @@ ENV/
 *.log
 temp_images/
 .DS_Store
-*.pdf
+uploads/*.pdf
+!uploads/.gitkeep
 extracted_pdf_data.json

@@ -28,14 +28,26 @@ def get_db_connection():
         print(f"Error connecting to database: {err}")
         return None
 
-def find_crime_head_id(cursor, head_name):
-    """Look up crime head ID by name (simulating PHP: $this->findCrimeHeadId)"""
-    # Try exact match first
-    cursor.execute("SELECT id FROM crime_heads WHERE head_name = %s OR head_name LIKE %s", (head_name, f"%{head_name}%"))
+def get_or_create_crime_head_id(cursor, head_name):
+    """
+    Look up crime head ID by name.
+    If not found, CREATE it automatically.
+    """
+    # 1. Try finding it
+    cursor.execute("SELECT id FROM crime_heads WHERE name = %s OR name LIKE %s LIMIT 1", (head_name, f"%{head_name}%"))
     result = cursor.fetchone()
     if result:
-        return result[0]
-    return None
+        return result['id']
+    
+    # 2. If not found, create it
+    try:
+        print(f"  - Creating new Crime Head: '{head_name}'")
+        # Default category to 'Uncategorized' or similar
+        cursor.execute("INSERT INTO crime_heads (name, category) VALUES (%s, %s)", (head_name, 'Other'))
+        return cursor.lastrowid
+    except mysql.connector.Error as err:
+        print(f"  - Error creating crime head '{head_name}': {err}")
+        return None
 
 def save_to_database(report_id, extracted_data, year=None, month=None):
     """
@@ -47,7 +59,7 @@ def save_to_database(report_id, extracted_data, year=None, month=None):
         print("Skipping database insertion: specific database connection required")
         return False
         
-    cursor = conn.cursor(dictionary=True)
+    cursor = conn.cursor(dictionary=True, buffered=True)
     
     try:
         # Start transaction
@@ -55,10 +67,13 @@ def save_to_database(report_id, extracted_data, year=None, month=None):
         print(f"Started DB Transaction for Report ID: {report_id}")
 
         # 1. Delete existing records for this report
-        tables_to_clear = ['crime_statistics', 'pending_cases', 'conviction_stats']
+        tables_to_clear = ['crime_statistics', 'pending_cases_by_head', 'conviction_stats']
         for table in tables_to_clear:
-            cursor.execute(f"DELETE FROM {table} WHERE report_upload_id = %s", (report_id,))
-            print(f"  - Cleared old records from {table}")
+            try:
+                cursor.execute(f"DELETE FROM {table} WHERE report_upload_id = %s", (report_id,))
+                print(f"  - Cleared old records from {table}")
+            except mysql.connector.Error as err:
+                 print(f"  - Warning: Could not clear {table}: {err}")
 
         processed_items = 0
         
@@ -90,10 +105,10 @@ def save_to_database(report_id, extracted_data, year=None, month=None):
                 if not stat.get('crime_head'):
                     continue
                 
-                # Get Crime Head ID
-                head_id = find_crime_head_id(cursor, stat['crime_head'])
+                # Get or Create Crime Head ID
+                head_id = get_or_create_crime_head_id(cursor, stat['crime_head'])
                 if not head_id:
-                    print(f"  - Warning: Crime head '{stat['crime_head']}' not found in DB")
+                    print(f"  - Warning: Could not create crime head '{stat['crime_head']}'")
                     continue
 
                 # Parse values (handle strings/ints/none)
@@ -106,14 +121,14 @@ def save_to_database(report_id, extracted_data, year=None, month=None):
                 # 2. Insert into CrimeStatistic
                 sql_crime = """
                     INSERT INTO crime_statistics 
-                    (report_upload_id, crime_head_id, year, period, registered, detected, detection_percentage)
+                    (report_upload_id, crime_head_id, year, period, registered, detected, detection_percent)
                     VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """
                 cursor.execute(sql_crime, (report_id, head_id, year, period, registered, detected, det_percent))
 
-                # 3. Insert into PendingCase
+                # 3. Insert into pending_cases_by_head
                 sql_pending = """
-                    INSERT INTO pending_cases
+                    INSERT INTO pending_cases_by_head
                     (report_upload_id, crime_head_id, month_0_3, month_3_6, month_6_12, above_1_year)
                     VALUES (%s, %s, %s, %s, %s, %s)
                 """
@@ -151,7 +166,7 @@ def save_to_database(report_id, extracted_data, year=None, month=None):
 
         # 5. Commit Transaction
         conn.commit()
-        print(f"✅ DB Transaction Committed. Processed {processed_items} items.")
+        print(f"DB Transaction Committed. Processed {processed_items} items.")
         
         # Update Log (simulated)
         if hasattr(cursor, 'execute'):
@@ -163,8 +178,10 @@ def save_to_database(report_id, extracted_data, year=None, month=None):
         return True
 
     except Exception as e:
+        import traceback
         conn.rollback()
-        print(f"❌ DB Transaction Rolled Back. Error: {str(e)}")
+        print(f"DB Transaction Rolled Back. Error: {str(e)}")
+        print(traceback.format_exc())
         if conn and conn.is_connected():
             cursor.close()
             conn.close()

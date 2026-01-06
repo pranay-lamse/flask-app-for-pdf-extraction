@@ -106,15 +106,16 @@ function renderCharts(data) {
         return reg > 0 ? ((crimeStats[l].detected / reg) * 100).toFixed(1) : 0;
     });
 
-    // Theme Colors (Matching CSS)
+    // Theme Colors (Matching CSS Light Theme)
     const colors = {
-        primary: '#6366f1',   // Indigo
-        success: '#10b981',   // Emerald
-        danger: '#ef4444',    // Rose
-        warning: '#f59e0b',   // Amber
-        info: '#3b82f6',      // Blue
-        text: '#94a3b8',      // Slate 400
-        grid: '#334155'       // Slate 700
+        primary: '#4f46e5',   // Indigo 600
+        success: '#059669',   // Emerald 600
+        danger: '#dc2626',    // Rose 600
+        warning: '#d97706',   // Amber 600
+        info: '#2563eb',      // Blue 600
+        text: '#64748b',      // Slate 500 (Secondary Text)
+        bg: '#ffffff',        // White
+        grid: '#e2e8f0'       // Slate 200
     };
 
     const commonOptions = {

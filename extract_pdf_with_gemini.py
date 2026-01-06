@@ -33,19 +33,35 @@ def get_or_create_crime_head_id(cursor, head_name):
     Look up crime head ID by name.
     If not found, CREATE it automatically.
     """
-    # 1. Try finding it
-    cursor.execute("SELECT id FROM crime_heads WHERE name = %s OR name LIKE %s LIMIT 1", (head_name, f"%{head_name}%"))
+    if not head_name:
+        return None
+        
+    head_name = head_name.strip()
+    
+    # 1. Try finding it (Exact match first)
+    cursor.execute("SELECT id FROM crime_heads WHERE name = %s", (head_name,))
     result = cursor.fetchone()
     if result:
         return result['id']
+        
+    # 2. Try Fuzzy match (Fallback for minor typos, but strict enough to avoid wrong merges)
+    # Removing 'LIKE' for now to ensure we respect the hierarchy extracted by Gemini (e.g. "Dacoity - Prof.")
+    # vs just matching any "Prof.". Strict creation is better for data integrity here.
     
-    # 2. If not found, create it
+    # 3. If not found, create it
     try:
         print(f"  - Creating new Crime Head: '{head_name}'")
         # Default category to 'Uncategorized' or similar
         cursor.execute("INSERT INTO crime_heads (name, category) VALUES (%s, %s)", (head_name, 'Other'))
         return cursor.lastrowid
     except mysql.connector.Error as err:
+        # Handle race condition (duplicate entry)
+        if err.errno == 1062: # Duplicate entry
+            cursor.execute("SELECT id FROM crime_heads WHERE name = %s", (head_name,))
+            result = cursor.fetchone()
+            if result:
+                return result['id']
+        
         print(f"  - Error creating crime head '{head_name}': {err}")
         return None
 
@@ -242,36 +258,6 @@ def extract_pdf_content_with_gemini(image_paths, prompt=None):
     # Default prompt optimized for SQL Schema matching
     if prompt is None:
         prompt = """
-        Analyze this PDF page (Police Crime Statistics) and extract data for database insertion.
-        
-        REQUIRED JSON STRUCTURE:
-        {
-          "crime_statistics": [
-            {
-              "crime_head": "Name of crime (e.g., Murder, Rape)",
-              "registered": 10,
-              "detected": 8,
-              "pending_0_3": 1,
-              "pending_3_6": 0,
-              "pending_6_12": 2,
-              "pending_1_year": 5
-            }
-          ],
-          "conviction_stats": {
-            "decided": 100,
-            "convicted": 60,
-            "acquitted": 40
-          },
-          "metadata": {
-            "year": 2024,
-            "month": 9
-          }
-        }
-        
-        IMPORTANT:
-        - "crime_head" must match exact official names if possible.
-        - Ensure numeric values are integers (0 if missing).
-        - Return ONLY valid JSON.
         """
     
     all_results = []

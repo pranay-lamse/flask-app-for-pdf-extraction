@@ -185,23 +185,130 @@ def save_to_database(report_id, extracted_data, year=None, month=None):
         print(f"DB Transaction Committed. Processed {processed_items} items.")
         
         # Update Log (simulated)
-        if hasattr(cursor, 'execute'):
-             # If you have a logs table you'd update it here
-             pass
-             
+        # Handle list or dict/single item
+        stats_list = page_data.get('crime_statistics', [])
+        # Normalization (similar to previous logic)
+        if not isinstance(stats_list, list):
+             if 'rows' in page_data: stats_list = page_data['rows']
+             elif 'data' in page_data: stats_list = page_data['data']
+             else: stats_list = [page_data] if isinstance(page_data, dict) else []
+
+        for stat in stats_list:
+            if not stat.get('crime_head'): continue
+            
+            # Get/Create Head ID
+            head_id = get_or_create_crime_head_id(cursor, stat['crime_head'])
+            if not head_id: continue
+
+            # Values
+            registered = int(stat.get('registered', 0))
+            detected = int(stat.get('detected', 0))
+            det_percent = round((detected / registered) * 100, 2) if registered > 0 else 0
+            
+            # Insert Crime Stats
+            cursor.execute("""
+                INSERT INTO crime_statistics 
+                (report_upload_id, crime_head_id, year, period, registered, detected, detection_percentage, page_number)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """, (report_id, head_id, year, period, registered, detected, det_percent, page_data.get('page_number', 0)))
+
+            # Insert Pending Cases (New Table)
+            cursor.execute("""
+                INSERT INTO pending_cases_by_head
+                (report_upload_id, crime_head_id, month_0_3, month_3_6, month_6_12, above_1_year)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (report_id, head_id, int(stat.get('pending_0_3', 0)), int(stat.get('pending_3_6', 0)), 
+                  int(stat.get('pending_6_12', 0)), int(stat.get('pending_1_year', 0))))
+
+        # Insert Conviction Stats
+        conviction = page_data.get('conviction_stats', {})
+        if conviction:
+            decided = int(conviction.get('decided', 0))
+            convicted = int(conviction.get('convicted', 0))
+            acquitted = int(conviction.get('acquitted', 0))
+            if decided == 0 and (convicted + acquitted) > 0: decided = convicted + acquitted
+            conv_percent = round((convicted / decided) * 100, 2) if decided > 0 else 0
+            
+            cursor.execute("""
+                INSERT INTO conviction_stats
+                (report_upload_id, year, decided, convicted, acquitted, conviction_percent)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (report_id, year, decided, convicted, acquitted, conv_percent))
+
+        conn.commit()
         cursor.close()
         conn.close()
         return True
+                (report_upload_id, year, decided, convicted, acquitted, conviction_percent, page_number)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """
+            cursor.execute(sql_conv, (report_id, year, decided, convicted, acquitted, conv_percent, page_number))
+            print(f"  - Inserted Conviction Stats for page {page_number}")
+
+        conn.commit()
+        print(f"  - Page {page_number} data committed. Processed {processed_items} items.")
+        return True
 
     except Exception as e:
-        import traceback
+        print(f"Error saving page {page_number}: {str(e)}")
         conn.rollback()
-        print(f"DB Transaction Rolled Back. Error: {str(e)}")
-        print(traceback.format_exc())
+        return False
+    finally:
         if conn and conn.is_connected():
             cursor.close()
             conn.close()
+
+def clear_report_data(report_id):
+    """
+    Deletes all existing records for a given report_upload_id from relevant tables.
+    """
+    conn = get_db_connection()
+    if not conn:
+        print("Skipping data clear: specific database connection required")
         return False
+    
+    cursor = conn.cursor()
+    try:
+        conn.start_transaction()
+        tables_to_clear = ['crime_statistics', 'pending_cases_by_head', 'conviction_stats']
+        for table in tables_to_clear:
+            try:
+                cursor.execute(f"DELETE FROM {table} WHERE report_upload_id = %s", (report_id,))
+                print(f"  - Cleared old records from {table} for report {report_id}")
+            except mysql.connector.Error as err:
+                 print(f"  - Warning: Could not clear {table} for report {report_id}: {err}")
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"Error clearing report data for {report_id}: {str(e)}")
+        conn.rollback()
+        return False
+    finally:
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
+
+def get_last_processed_page(report_id):
+    """
+    Get the last page number that was successfully inserted into the DB for this report.
+    Returns 0 if no pages processed.
+    """
+    conn = get_db_connection()
+    if not conn: return 0
+    
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT MAX(page_number) FROM crime_statistics WHERE report_upload_id = %s", (report_id,))
+        result = cursor.fetchone()
+        last_page = result[0] if result and result[0] else 0
+        return last_page
+    except Exception as e:
+        print(f"Error checking progress: {e}")
+        return 0
+    finally:
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
 
 def pdf_to_images(pdf_path, output_folder="temp_images"):
     """
@@ -244,50 +351,104 @@ def encode_image_to_base64(image_path):
     with open(image_path, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode('utf-8')
 
-def extract_pdf_content_with_gemini(image_paths, prompt=None):
+def extract_pdf_content_with_gemini(image_paths, report_id=None, year=2024, month=None, prompt=None):
     """
-    Extract content from PDF images using Gemini Flash API via REST
-    
-    Args:
-        image_paths: List of image file paths
-        prompt: Custom prompt for extraction (optional)
-        
-    Returns:
-        JSON response from Gemini
+    Extract content from PDF images and optionally save to DB incrementally.
+    Supports RESUME capability by checking last processed page.
     """
     # Default prompt optimized for SQL Schema matching
     if prompt is None:
         prompt = """
+        You are an expert data extractor. analyze the crime statistics table in these images.
+        
+        Extract the rows into a JSON list.
+        Review the table structure carefully. It often contains main headers and sub-headers (indented).
+        
+        IMPORTANT: For sub-headers (like 'Prof.', 'Technical.', 'Major', 'Minor'), you MUST combine them with their PARENT header to create a unique 'crime_head'.
+        Example Structure:
+        - Rape
+          - Minor
+          - Major
+        - Dacoity
+          - Prof.
+          - Technical.
+          
+        Extraction Output Should Be:
+        [
+          {"crime_head": "Rape", ...},
+          {"crime_head": "Rape - Minor", ...},
+          {"crime_head": "Rape - Major", ...},
+          {"crime_head": "Dacoity", ...},
+          {"crime_head": "Dacoity - Prof.", ...},
+          {"crime_head": "Dacoity - Technical.", ...}
+        ]
+        
+        If a row looks like a total or sub-total, include it.
+        
+        For each row, extract:
+        1. "crime_head": The full hierarchical name as described above (String).
+        2. "registered": The number of registered cases (Int). Look for columns like "Reg.", "Registered", or "Cases".
+        3. "detected": The number of detected cases (Int). Look for columns like "Det.", "Detected".
+        4. "pending_0_3": Pending cases 0-3 months (Int).
+        5. "pending_3_6": Pending cases 3-6 months (Int).
+        6. "pending_6_12": Pending cases 6-12 months (Int).
+        7. "pending_1_year": Pending cases > 1 year (Int).
+        
+        Also look for a "Conviction" table or section and extract:
+        - "conviction_stats": {
+            "decided": Int,
+            "convicted": Int,
+            "acquitted": Int
+        }
+        
+        Return ONLY valid JSON.
         """
     
     all_results = []
     
+    # RESUME LOGIC
+    start_index = 0
+    if report_id:
+        last_page = get_last_processed_page(report_id)
+        if last_page > 0:
+            print(f"🔄 RESUMING extraction from Page {last_page + 1} (Pages 1-{last_page} already in DB)")
+            start_index = last_page
+            # Don't clear data if resuming!
+        else:
+            # First time for this report, clear any partial junk
+            clear_report_data(report_id)
+    
     for idx, image_path in enumerate(image_paths):
-        print(f"\nProcessing page {idx + 1}/{len(image_paths)}: {image_path}")
+        current_page_num = idx + 1
+        
+        # SKIP pages already processed
+        if current_page_num <= start_index:
+            print(f"  - Skipping page {current_page_num} (already processed)")
+            continue
+            
+        print(f"\nProcessing page {current_page_num}/{len(image_paths)}: {image_path}")
+        
+        base64_image = encode_image_to_base64(image_path)
+        
+        payload = {
+            "contents": [{
+                "parts": [
+                    {"text": prompt},
+                    {
+                        "inline_data": {
+                            "mime_type": "image/png",
+                            "data": base64_image
+                        }
+                    }
+                ]
+            }],
+            "generationConfig": {
+                "temperature": 0.1,
+                "responseMimeType": "application/json"
+            }
+        }
         
         try:
-            # Encode image to base64
-            image_base64 = encode_image_to_base64(image_path)
-            
-            # Create the request payload
-            payload = {
-                "contents": [{
-                    "parts": [
-                        {"text": prompt},
-                        {
-                            "inline_data": {
-                                "mime_type": "image/png",
-                                "data": image_base64
-                            }
-                        }
-                    ]
-                }],
-                "generationConfig": {
-                    "temperature": 0.1,
-                    "responseMimeType": "application/json"
-                }
-            }
-            
             # Make the API request
             response = requests.post(
                 GEMINI_API_URL,
@@ -306,20 +467,32 @@ def extract_pdf_content_with_gemini(image_paths, prompt=None):
                     
                     try:
                         result = json.loads(content)
-                        result['page_number'] = idx + 1
+                        # Ensure strict structure
+                        if isinstance(result, list):
+                            result = {"crime_statistics": result}
+                        elif "rows" in result:
+                            result["crime_statistics"] = result["rows"]
+
+                        result['page_number'] = current_page_num
                         all_results.append(result)
-                        print(f"  [SUCCESS] Successfully extracted data from page {idx + 1}")
+                        print(f"  [SUCCESS] Successfully extracted data from page {current_page_num}")
+
+                        # Incremental Save
+                        if report_id:
+                            print(f"  -> Saving Page {current_page_num} to Database...")
+                            save_page_to_database(report_id, result, year, month)
+
                     except json.JSONDecodeError:
-                        print(f"  [ERROR] Failed to parse JSON from page {idx + 1}")
+                        print(f"  [ERROR] Failed to parse JSON from page {current_page_num}")
                         all_results.append({
-                            'page_number': idx + 1,
+                            'page_number': current_page_num,
                             'raw_response': content,
                             'error': 'JSON parsing failed'
                         })
                 else:
-                    print(f"  [ERROR] No valid response from API for page {idx + 1}")
+                    print(f"  [ERROR] No valid response from API for page {current_page_num}")
                     all_results.append({
-                        'page_number': idx + 1,
+                        'page_number': current_page_num,
                         'error': 'No valid response from API',
                         'raw_response': response_data
                     })
@@ -328,15 +501,15 @@ def extract_pdf_content_with_gemini(image_paths, prompt=None):
                 print(f"  [ERROR] API request failed with status {response.status_code}")
                 print(f"  Error details: {error_msg}")
                 all_results.append({
-                    'page_number': idx + 1,
+                    'page_number': current_page_num,
                     'error': f'API request failed: {response.status_code}',
                     'error_details': error_msg
                 })
                 
         except Exception as e:
-            print(f"  [ERROR] Error processing page {idx + 1}: {str(e)}")
+            print(f"  [ERROR] Error processing page {current_page_num}: {str(e)}")
             all_results.append({
-                'page_number': idx + 1,
+                'page_number': current_page_num,
                 'error': str(e)
             })
     
@@ -357,7 +530,7 @@ def cleanup_temp_images(image_folder="temp_images"):
 
 def main():
     # PDF file path
-    pdf_path = "bhandara sept-2-3.pdf"
+    pdf_path = "bhandara sept.pdf"
     
     # Mock parameters (In a real app, these would come from CLI args or API request)
     REPORT_ID = 1  # Replace with actual report_upload_id

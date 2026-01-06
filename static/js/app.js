@@ -33,7 +33,7 @@ uploadArea.addEventListener('dragleave', () => {
 uploadArea.addEventListener('drop', (e) => {
     e.preventDefault();
     uploadArea.classList.remove('dragover');
-    
+
     const files = e.dataTransfer.files;
     if (files.length > 0 && files[0].type === 'application/pdf') {
         handleFileSelect(files[0]);
@@ -58,37 +58,37 @@ function handleFileSelect(file) {
 // Extract PDF
 extractBtn.addEventListener('click', async () => {
     if (!selectedFile) return;
-    
+
     const formData = new FormData();
     formData.append('file', selectedFile);
-    
+
     try {
         // Show loading
         results.innerHTML = '';
         loadingSpinner.style.display = 'block';
         extractBtn.disabled = true;
         extractBtn.textContent = 'Processing...';
-        
+
         // Upload and extract
         const response = await fetch(`${API_BASE_URL}/extract`, {
             method: 'POST',
             body: formData
         });
-        
+
         const data = await response.json();
-        
+
         // Hide loading
         loadingSpinner.style.display = 'none';
         extractBtn.disabled = false;
         extractBtn.textContent = 'Extract Content';
-        
+
         if (data.success) {
             displayResults(data);
             loadPDFList(); // Refresh the list
         } else {
             showError(data.error || 'Extraction failed');
         }
-        
+
     } catch (error) {
         loadingSpinner.style.display = 'none';
         extractBtn.disabled = false;
@@ -102,7 +102,7 @@ async function loadPDFList() {
     try {
         const response = await fetch(`${API_BASE_URL}/list-pdfs`);
         const data = await response.json();
-        
+
         if (data.pdfs && data.pdfs.length > 0) {
             displayPDFList(data.pdfs);
         } else {
@@ -131,21 +131,21 @@ async function extractExistingPDF(pdfName) {
     try {
         results.innerHTML = '';
         loadingSpinner.style.display = 'block';
-        
+
         const response = await fetch(`${API_BASE_URL}/extract-saved/${encodeURIComponent(pdfName)}`, {
             method: 'POST'
         });
-        
+
         const data = await response.json();
-        
+
         loadingSpinner.style.display = 'none';
-        
+
         if (data.success) {
             displayResults(data);
         } else {
             showError(data.error || 'Extraction failed');
         }
-        
+
     } catch (error) {
         loadingSpinner.style.display = 'none';
         showError(`Error: ${error.message}`);
@@ -156,7 +156,7 @@ async function extractExistingPDF(pdfName) {
 function displayResults(data) {
     const successPages = data.data.filter(page => !page.error).length;
     const failedPages = data.total_pages - successPages;
-    
+
     let html = `
         <div class="result-header">
             <h3>✅ Extraction Complete: ${data.filename}</h3>
@@ -185,9 +185,9 @@ function displayResults(data) {
             <pre>${syntaxHighlight(JSON.stringify(data.data, null, 2))}</pre>
         </div>
     `;
-    
+
     results.innerHTML = html;
-    
+
     // Store for download
     window.lastExtraction = data;
 }
@@ -195,16 +195,16 @@ function displayResults(data) {
 // Download JSON
 function downloadJSON() {
     if (!window.lastExtraction) return;
-    
+
     const dataStr = JSON.stringify(window.lastExtraction.data, null, 2);
     const blob = new Blob([dataStr], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
-    
+
     const a = document.createElement('a');
     a.href = url;
     a.download = `${window.lastExtraction.filename.replace('.pdf', '')}_extracted.json`;
     a.click();
-    
+
     URL.revokeObjectURL(url);
 }
 
@@ -218,8 +218,247 @@ function showError(message) {
     `;
 }
 
+let extractedData = null;
+let charts = {};
+
+function switchTab(tabId) {
+    // Hide all tabs
+    document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+
+    // Show selected
+    document.getElementById(tabId + 'Tab').classList.add('active');
+
+    // Activate button
+    const buttons = document.querySelectorAll('.tab-btn');
+    if (tabId === 'json') buttons[0].classList.add('active');
+    else buttons[1].classList.add('active');
+}
+
+function renderCharts(data) {
+    // Destroy existing charts
+    Object.values(charts).forEach(chart => chart.destroy());
+
+    // Aggregate Data across pages
+    let crimeStats = {};
+    let pendingStats = {
+        '0-3 Months': 0, '3-6 Months': 0, '6-12 Months': 0, '> 1 Year': 0
+    };
+    let convictionStats = { decided: 0, convicted: 0, acquitted: 0 };
+
+    data.forEach(page => {
+        // Crime Aggregation
+        const pageStats = page.crime_statistics || page.rows || [];
+        if (Array.isArray(pageStats)) {
+            pageStats.forEach(stat => {
+                const head = stat.crime_head || 'Unknown';
+                if (!crimeStats[head]) {
+                    crimeStats[head] = { registered: 0, detected: 0 };
+                }
+                crimeStats[head].registered += parseInt(stat.registered || 0);
+                crimeStats[head].detected += parseInt(stat.detected || 0);
+
+                // Pending Calc (summing up totals for stacked chart)
+                pendingStats['0-3 Months'] += parseInt(stat.pending_0_3 || 0);
+                pendingStats['3-6 Months'] += parseInt(stat.pending_3_6 || 0);
+                pendingStats['6-12 Months'] += parseInt(stat.pending_6_12 || 0);
+                pendingStats['> 1 Year'] += parseInt(stat.pending_1_year || 0);
+            });
+        }
+
+        // Conviction Aggregation
+        if (page.conviction_stats) {
+            convictionStats.decided += parseInt(page.conviction_stats.decided || 0);
+            convictionStats.convicted += parseInt(page.conviction_stats.convicted || 0);
+            convictionStats.acquitted += parseInt(page.conviction_stats.acquitted || 0);
+        }
+    });
+
+    const labels = Object.keys(crimeStats);
+    const registeredData = labels.map(l => crimeStats[l].registered);
+    const detectedData = labels.map(l => crimeStats[l].detected);
+    const detectionRates = labels.map(l => {
+        const reg = crimeStats[l].registered;
+        return reg > 0 ? ((crimeStats[l].detected / reg) * 100).toFixed(1) : 0;
+    });
+
+    // 1. Crime Overview Chart
+    const ctx1 = document.getElementById('crimeStatsChart').getContext('2d');
+    charts.crime = new Chart(ctx1, {
+        type: 'bar',
+        data: {
+            labels: labels,
+            datasets: [
+                {
+                    label: 'Registered',
+                    data: registeredData,
+                    backgroundColor: 'rgba(239, 68, 68, 0.7)', // Red
+                    borderColor: 'rgba(239, 68, 68, 1)',
+                    borderWidth: 1
+                },
+                {
+                    label: 'Detected',
+                    data: detectedData,
+                    backgroundColor: 'rgba(34, 197, 94, 0.7)', // Green
+                    borderColor: 'rgba(34, 197, 94, 1)',
+                    borderWidth: 1
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            plugins: { legend: { position: 'top' } },
+            scales: { y: { beginAtZero: true } }
+        }
+    });
+
+    // 2. Detection Efficiency Chart
+    const ctx2 = document.getElementById('detectionChart').getContext('2d');
+    charts.detection = new Chart(ctx2, {
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: [{
+                label: 'Detection Rate (%)',
+                data: detectionRates,
+                borderColor: 'rgba(59, 130, 246, 1)', // Blue
+                backgroundColor: 'rgba(59, 130, 246, 0.2)',
+                fill: true,
+                tension: 0.4
+            }]
+        },
+        options: {
+            responsive: true,
+            scales: { y: { beginAtZero: true, max: 100 } }
+        }
+    });
+
+    // 3. Conviction Chart
+    const ctx3 = document.getElementById('convictionChart').getContext('2d');
+    charts.conviction = new Chart(ctx3, {
+        type: 'doughnut',
+        data: {
+            labels: ['Convicted', 'Acquitted', 'Pending Decision'],
+            datasets: [{
+                data: [
+                    convictionStats.convicted,
+                    convictionStats.acquitted,
+                    convictionStats.decided - (convictionStats.convicted + convictionStats.acquitted)
+                ],
+                backgroundColor: [
+                    'rgba(34, 197, 94, 0.8)', // Green
+                    'rgba(239, 68, 68, 0.8)', // Red
+                    'rgba(234, 179, 8, 0.8)'  // Yellow
+                ]
+            }]
+        }
+    });
+
+    // 4. Pending Cases Chart
+    const ctx4 = document.getElementById('pendingCasesChart').getContext('2d');
+    charts.pending = new Chart(ctx4, {
+        type: 'bar',
+        data: {
+            labels: Object.keys(pendingStats),
+            datasets: [{
+                label: 'Pending Cases',
+                data: Object.values(pendingStats),
+                backgroundColor: 'rgba(168, 85, 247, 0.7)', // Purple
+                borderColor: 'rgba(168, 85, 247, 1)',
+                borderWidth: 1
+            }]
+        },
+        options: {
+            responsive: true,
+            plugins: { legend: { display: false } },
+            scales: { y: { beginAtZero: true } }
+        }
+    });
+}
+
 // Refresh Button
 refreshBtn.addEventListener('click', loadPDFList);
+
+// Load DB Data Button
+async function loadDBData() {
+    try {
+        loadingSpinner.classList.remove('hidden');
+        resultsSection.classList.add('hidden');
+
+        const response = await fetch('/api/latest-report-data');
+        const result = await response.json();
+
+        if (!response.ok) {
+            uploadStatus.innerHTML = `<span class="error">${result.error}</span>`;
+            loadingSpinner.classList.add('hidden');
+            return;
+        }
+
+        // Normalize Data structure if needed
+        let processedData = [];
+        if (result.crime_statistics) { // Check for crime_statistics directly from the API response
+            // Processing single report object structure
+            // We need to reshape it slightly to match what renderCharts expects (array of pages)
+            // or modify renderCharts to handle this pre-aggregated format
+
+            // Actually, renderCharts expects an array of page objects with 'crime_statistics' or 'rows'
+            // Our API returns 'crime_statistics' directly.
+            // Let's wrap it in a pseudo-page object
+            processedData = [{
+                crime_statistics: result.crime_statistics,
+                conviction_stats: result.conviction_stats,
+                // Add pending stats to each row? No, renderCharts aggregates them.
+                // We need to adapt renderCharts to handle pre-fetched pending stats better
+                // Or just munge the data here.
+            }];
+
+            // Special handling for Pending Stats which are now separate
+            if (result.pending_by_head) {
+                // Merge pending stats into crime stats matching by crime_head
+                result.pending_by_head.forEach(p => {
+                    const match = processedData[0].crime_statistics.find(c => c.crime_head === p.crime_head);
+                    if (match) {
+                        match.pending_0_3 = p.pending_0_3;
+                        match.pending_3_6 = p.pending_3_6;
+                        match.pending_6_12 = p.pending_6_12;
+                        match.pending_1_year = p.pending_1_year;
+                    } else {
+                        // Add if missing crime head
+                        processedData[0].crime_statistics.push({
+                            crime_head: p.crime_head,
+                            registered: 0,
+                            detected: 0,
+                            pending_0_3: p.pending_0_3,
+                            pending_3_6: p.pending_3_6,
+                            pending_6_12: p.pending_6_12,
+                            pending_1_year: p.pending_1_year
+                        });
+                    }
+                });
+            }
+        }
+
+        renderCharts(processedData);
+        switchTab('charts');
+
+        uploadStatus.innerHTML = `<span class="success"><i class="fas fa-database"></i> Loaded Report #${result.report_id} from Database</span>`;
+        jsonOutput.textContent = JSON.stringify(result, null, 2);
+        resultsSection.classList.remove('hidden');
+
+    } catch (error) {
+        console.error(error);
+        uploadStatus.innerHTML = `<span class="error">Failed to load from DB</span>`;
+    } finally {
+        loadingSpinner.classList.add('hidden');
+    }
+}
+
+// Auto-load on init
+document.addEventListener('DOMContentLoaded', () => {
+    loadPDFList();
+    // Optional: Auto load DB data if available
+    // loadDBData();
+});
 
 // Utilities
 function formatBytes(bytes) {

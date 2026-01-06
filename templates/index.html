@@ -1,44 +1,53 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PDF Content Extractor - Gemini AI</title>
+    <title>PDF Intelligence Extractor</title>
+    <!-- Font Awesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
+
 <body>
     <div class="container">
         <header>
-            <h1>📄 PDF Content Extractor</h1>
-            <p class="subtitle">Extract structured data from PDFs using Gemini AI</p>
-        </header>
-
-        <div class="main-content">
-            <!-- Upload Section -->
-            <div class="card upload-section">
-                <h2>1. Upload PDF</h2>
-                <div class="upload-area" id="uploadArea">
-                    <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                        <polyline points="17 8 12 3 7 8"></polyline>
-                        <line x1="12" y1="3" x2="12" y2="15"></line>
-                    </svg>
-                    <p>Drag & Drop PDF here or click to browse</p>
-                    <input type="file" id="fileInput" accept=".pdf" hidden>
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <div>
+                    <h1><i class="fas fa-file-pdf"></i> PDF Intelligence Extractor</h1>
+                    <p>Upload PDF reports to extract crime statistics and visualize data instantly</p>
                 </div>
-                <div id="fileInfo" class="file-info" style="display: none;">
-                    <p><strong>Selected:</strong> <span id="fileName"></span></p>
-                    <button id="extractBtn" class="btn btn-primary">Extract Content</button>
+                <div>
+                    <a href="/" class="btn secondary"><i class="fas fa-chart-line"></i> Analytics Dashboard</a>
                 </div>
             </div>
+        </header>
 
-            <!-- Saved PDFs Section -->
-            <div class="card saved-pdfs-section">
-                <h2>2. Saved PDFs</h2>
-                <div id="pdfList" class="pdf-list">
-                    <p class="placeholder">No PDFs uploaded yet</p>
+        <main>
+            <!-- Upload Section -->
+            <section class="upload-section">
+                <div class="drop-zone" id="dropZone">
+                    <i class="fas fa-cloud-upload-alt fa-3x"></i>
+                    <h3>Drag & Drop PDF here</h3>
+                    <p>or click to browse files</p>
+                    <input type="file" id="fileInput" accept=".pdf" hidden>
+                    <div style="margin-top: 15px;">
+                        <span style="font-size:0.9rem; color: #888;">OR</span><br>
+                        <button class="btn secondary" style="margin-top: 10px;" onclick="loadDBData()">
+                            <i class="fas fa-database"></i> Load Latest DB Data
+                        </button>
+                    </div>
                 </div>
-                <button id="refreshBtn" class="btn btn-secondary">Refresh List</button>
+                <div id="uploadStatus" class="status-message"></div>
+            </section>
+
+            <!-- Loading Spinner -->
+            <div id="loadingSpinner" class="hidden">
+                <div class="spinner"></div>
+                <p>Analyzing document with Gemini Vision AI...</p>
             </div>
 
             <!-- Results Section -->
@@ -52,9 +61,10 @@
                     <p class="placeholder">Upload and extract a PDF to see results</p>
                 </div>
             </div>
-        </div>
+    </div>
     </div>
 
     <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>
+
 </html>

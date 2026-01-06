@@ -14,8 +14,8 @@ def check_schema():
         )
         cursor = conn.cursor()
         
-        print("\nChecking 'conviction_stats' table schema:")
-        cursor.execute("DESCRIBE conviction_stats")
+        print("\nChecking 'report_uploads' table schema:")
+        cursor.execute("DESCRIBE report_uploads")
         for column in cursor.fetchall():
             print(column)
             

@@ -1,3 +1,4 @@
+
 import os
 import json
 import base64
@@ -8,6 +9,7 @@ import requests
 from werkzeug.utils import secure_filename
 from datetime import datetime
 from dotenv import load_dotenv
+import mysql.connector
 
 # Load environment variables from .env file
 load_dotenv()
@@ -28,9 +30,9 @@ GEMINI_API_KEY =  'AIzaSyDmruExS4O2OqNr_yBJXBzaUDv0pPDD1Cc'
 GEMINI_MODEL = 'gemini-2.5-flash'
 
 if GEMINI_API_KEY:
-    print(f"✅ API Key loaded: {GEMINI_API_KEY[:5]}...{GEMINI_API_KEY[-4:]}")
+    print(f"API Key loaded: {GEMINI_API_KEY[:5]}...{GEMINI_API_KEY[-4:]}")
 else:
-    print("❌ API Key NOT loaded! Check .env file.")
+    print("Warning: GEMINI_API_KEY not found in .env! Check .env file.")
 
 GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
 
@@ -140,9 +142,12 @@ def extract_pdf_content_with_gemini(image_paths, custom_prompt=None):
     
     return all_results
 
-@app.route('/', methods=['GET'])
+@app.route('/')
 def index():
-    """Serve the web UI"""
+    return render_template('dashboard.html')
+
+@app.route('/upload')
+def upload_page():
     return render_template('index.html')
 
 @app.route('/health', methods=['GET'])
@@ -308,10 +313,96 @@ def extract_pdf():
             'error': f'Processing failed: {str(e)}'
         }), 500
 
+# MySQL Configuration
+def get_db_connection():
+    try:
+        import mysql.connector
+        return mysql.connector.connect(
+            host=os.getenv("DB_HOST", "localhost"),
+            user=os.getenv("DB_USER", "root"),
+            password=os.getenv("DB_PASSWORD", ""),
+            database=os.getenv("DB_NAME", "crimedigest")
+        )
+    except Exception as e:
+        print(f"DB Connection Error: {e}")
+        return None
+
+@app.route('/api/latest-report-data')
+def get_latest_report_data():
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({'error': 'Database connection failed'}), 500
+    
+    try:
+        cursor = conn.cursor(dictionary=True)
+        
+        # 1. Get Latest Report ID (from metadata or stats if metadata table empty)
+        # Try fetching from report_uploads first
+        cursor.execute("SELECT id, year, month, created_at FROM report_uploads ORDER BY id DESC LIMIT 1")
+        report = cursor.fetchone()
+        
+        if not report:
+            # Fallback: Check crime_statistics if report_uploads is empty (testing scenario)
+            cursor.execute("SELECT DISTINCT report_upload_id as id FROM crime_statistics ORDER BY report_upload_id DESC LIMIT 1")
+            report = cursor.fetchone()
+            
+        if not report:
+            return jsonify({'error': 'No reports found in database'}), 404
+            
+        report_id = report['id']
+        
+        # 2. Fetch Crime Stats (Join with Crime Heads)
+        cursor.execute("""
+            SELECT 
+                cs.registered, cs.detected, cs.detection_percent, 
+                ch.name as crime_head
+            FROM crime_statistics cs
+            JOIN crime_heads ch ON cs.crime_head_id = ch.id
+            WHERE cs.report_upload_id = %s
+        """, (report_id,))
+        crime_stats = cursor.fetchall()
+        
+        # 3. Fetch Pending Cases (Join with Crime Heads)
+        cursor.execute("""
+            SELECT 
+                pc.month_0_3 as pending_0_3, pc.month_3_6 as pending_3_6, 
+                pc.month_6_12 as pending_6_12, pc.above_1_year as pending_1_year,
+                ch.name as crime_head
+            FROM pending_cases_by_head pc
+            JOIN crime_heads ch ON pc.crime_head_id = ch.id
+            WHERE pc.report_upload_id = %s
+        """, (report_id,))
+        pending_stats = cursor.fetchall()
+        
+        # 4. Fetch Conviction Stats
+        cursor.execute("""
+            SELECT decided, convicted, acquitted 
+            FROM conviction_stats 
+            WHERE report_upload_id = %s 
+            ORDER BY id DESC LIMIT 1
+        """, (report_id,))
+        conviction_stats = cursor.fetchone()
+        
+        return jsonify({
+            'report_id': report_id,
+            'year': report.get('year'),
+            'month': report.get('month'),
+            'crime_statistics': crime_stats,
+            'rows': crime_stats, # For frontend compatibility
+            'pending_by_head': pending_stats,
+            'conviction_stats': conviction_stats
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    # Enable debug mode for auto-reloading
-    print("🚀 Starting Flask server in DEBUG mode...")
-    print(f"📂 Upload folder: {app.config['UPLOAD_FOLDER']}")
-    print(f"🔑 API Key configured: {bool(GEMINI_API_KEY)}")
+    # Debug mode enables auto-reload
+    print(f"Starting Flask server in DEBUG mode...")
+    print(f"API Key configured: {bool(GEMINI_API_KEY)}")
     app.run(host='0.0.0.0', port=port, debug=True)

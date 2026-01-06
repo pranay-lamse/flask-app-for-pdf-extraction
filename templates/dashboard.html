@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Crime Analytics Dashboard</title>
+    <!-- Font Awesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <style>
+        .dashboard-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 2rem;
+        }
+
+        .back-link {
+            text-decoration: none;
+            color: var(--text-secondary);
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            transition: color 0.3s;
+        }
+
+        .back-link:hover {
+            color: var(--primary);
+        }
+
+        #loadingState {
+            text-align: center;
+            padding: 4rem;
+            color: var(--text-secondary);
+        }
+
+        .charts-container {
+            animation: fadeIn 0.5s ease;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <header class="dashboard-header">
+            <div>
+                <h1><i class="fas fa-chart-pie"></i> Crime Analytics Dashboard</h1>
+                <p>Visualizing latest data from CrimeDigest Engine</p>
+            </div>
+            <a href="/upload" class="back-link"><i class="fas fa-arrow-left"></i> Upload New Report</a>
+        </header>
+
+        <main>
+            <div id="loadingState">
+                <div class="spinner"></div>
+                <p>Fetching latest crime statistics...</p>
+            </div>
+
+            <div id="errorMessage" class="error hidden" style="margin-bottom: 2rem;"></div>
+
+            <div id="dashboardContent" class="charts-container hidden">
+                <div class="results-header">
+                    <h2 id="reportTitle">Report Analysis</h2>
+                    <div class="actions">
+                        <button class="btn secondary" onclick="location.reload()">
+                            <i class="fas fa-sync"></i> Refresh Data
+                        </button>
+                    </div>
+                </div>
+
+                <div class="charts-grid">
+                    <div class="chart-card large">
+                        <h3>Crime Statistics Overview</h3>
+                        <canvas id="crimeStatsChart"></canvas>
+                    </div>
+                    <div class="chart-card">
+                        <h3>Detection Efficiency (%)</h3>
+                        <canvas id="detectionChart"></canvas>
+                    </div>
+                    <div class="chart-card">
+                        <h3>Conviction Status</h3>
+                        <canvas id="convictionChart"></canvas>
+                    </div>
+                    <div class="chart-card large">
+                        <h3>Pending Cases Breakdown</h3>
+                        <canvas id="pendingCasesChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+</body>
+
+</html>

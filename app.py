@@ -7,6 +7,10 @@ from pdf2image import convert_from_path
 import requests
 from werkzeug.utils import secure_filename
 from datetime import datetime
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
@@ -20,8 +24,14 @@ ALLOWED_EXTENSIONS = {'pdf'}
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 # Get API key from environment variable
-GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
-GEMINI_MODEL = os.environ.get('GEMINI_MODEL', 'gemini-2.5-flash-lite')
+GEMINI_API_KEY =  'AIzaSyDmruExS4O2OqNr_yBJXBzaUDv0pPDD1Cc'
+GEMINI_MODEL = os.environ.get('GEMINI_MODEL', 'gemini-2.5-flash')
+
+if GEMINI_API_KEY:
+    print(f"✅ API Key loaded: {GEMINI_API_KEY[:5]}...{GEMINI_API_KEY[-4:]}")
+else:
+    print("❌ API Key NOT loaded! Check .env file.")
+
 GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
 
 def allowed_file(filename):

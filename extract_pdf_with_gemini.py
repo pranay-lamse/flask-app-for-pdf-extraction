@@ -4,10 +4,171 @@ import base64
 from pdf2image import convert_from_path
 import requests
 from pathlib import Path
+from dotenv import load_dotenv
+import mysql.connector
+from datetime import datetime
+
+# Load environment variables
+load_dotenv()
 
 # Configure Gemini API
-API_KEY = "AIzaSyDmruExS4O2OqNr_yBJXBzaUDv0pPDD1Cc"
+API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyDmruExS4O2OqNr_yBJXBzaUDv0pPDD1Cc")
 GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key={API_KEY}"
+
+def get_db_connection():
+    """Establish and return a database connection"""
+    try:
+        return mysql.connector.connect(
+            host=os.getenv("DB_HOST", "localhost"),
+            user=os.getenv("DB_USER", "root"),
+            password=os.getenv("DB_PASSWORD", ""),
+            database=os.getenv("DB_NAME", "crimedigest")
+        )
+    except mysql.connector.Error as err:
+        print(f"Error connecting to database: {err}")
+        return None
+
+def find_crime_head_id(cursor, head_name):
+    """Look up crime head ID by name (simulating PHP: $this->findCrimeHeadId)"""
+    # Try exact match first
+    cursor.execute("SELECT id FROM crime_heads WHERE head_name = %s OR head_name LIKE %s", (head_name, f"%{head_name}%"))
+    result = cursor.fetchone()
+    if result:
+        return result[0]
+    return None
+
+def save_to_database(report_id, extracted_data, year=None, month=None):
+    """
+    Save extracted data to MySQL database with transaction support
+    Mimics the PHP logic provided by user
+    """
+    conn = get_db_connection()
+    if not conn:
+        print("Skipping database insertion: specific database connection required")
+        return False
+        
+    cursor = conn.cursor(dictionary=True)
+    
+    try:
+        # Start transaction
+        conn.start_transaction()
+        print(f"Started DB Transaction for Report ID: {report_id}")
+
+        # 1. Delete existing records for this report
+        tables_to_clear = ['crime_statistics', 'pending_cases', 'conviction_stats']
+        for table in tables_to_clear:
+            cursor.execute(f"DELETE FROM {table} WHERE report_upload_id = %s", (report_id,))
+            print(f"  - Cleared old records from {table}")
+
+        processed_items = 0
+        
+        # Determine period string
+        period = "Full Year"
+        if month:
+            # simple mapping, PHP used mktime for month name
+            months = ["", "January", "February", "March", "April", "May", "June", 
+                      "July", "August", "September", "October", "November", "December"]
+            if 1 <= int(month) <= 12:
+                period = months[int(month)]
+
+        # Iterate through pages and extracted items
+        for page_data in extracted_data:
+            stats_list = page_data.get('crime_statistics', [])
+            if not isinstance(stats_list, list):
+                # Handle case where it might be a dictionary or nested differently
+                # depending on exact JSON structure returned by Gemini
+                if 'rows' in page_data: # Common structure
+                    stats_list = page_data['rows']
+                elif 'data' in page_data:
+                    stats_list = page_data['data']
+                else: 
+                     # If extraction returned a flat list in 'data' key mainly
+                     stats_list = [page_data] if isinstance(page_data, dict) else []
+
+            for stat in stats_list:
+                # Validate required fields
+                if not stat.get('crime_head'):
+                    continue
+                
+                # Get Crime Head ID
+                head_id = find_crime_head_id(cursor, stat['crime_head'])
+                if not head_id:
+                    print(f"  - Warning: Crime head '{stat['crime_head']}' not found in DB")
+                    continue
+
+                # Parse values (handle strings/ints/none)
+                registered = int(stat.get('registered', 0))
+                detected = int(stat.get('detected', 0))
+                
+                # Calculate percent
+                det_percent = round((detected / registered) * 100, 2) if registered > 0 else 0
+
+                # 2. Insert into CrimeStatistic
+                sql_crime = """
+                    INSERT INTO crime_statistics 
+                    (report_upload_id, crime_head_id, year, period, registered, detected, detection_percentage)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """
+                cursor.execute(sql_crime, (report_id, head_id, year, period, registered, detected, det_percent))
+
+                # 3. Insert into PendingCase
+                sql_pending = """
+                    INSERT INTO pending_cases
+                    (report_upload_id, crime_head_id, month_0_3, month_3_6, month_6_12, above_1_year)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """
+                cursor.execute(sql_pending, (
+                    report_id, 
+                    head_id, 
+                    int(stat.get('pending_0_3', 0)),
+                    int(stat.get('pending_3_6', 0)),
+                    int(stat.get('pending_6_12', 0)),
+                    int(stat.get('pending_1_year', 0))
+                ))
+                
+                processed_items += 1
+
+            # 4. Conviction Stats (usually one per report/page section)
+            conviction = page_data.get('conviction_stats', {})
+            if conviction:
+                decided = int(conviction.get('decided', 0))
+                convicted = int(conviction.get('convicted', 0))
+                acquitted = int(conviction.get('acquitted', 0))
+                
+                # Auto-calculate decided if missing
+                if decided == 0 and (convicted + acquitted) > 0:
+                    decided = convicted + acquitted
+                
+                conv_percent = round((convicted / decided) * 100, 2) if decided > 0 else 0
+                
+                sql_conv = """
+                    INSERT INTO conviction_stats
+                    (report_upload_id, year, decided, convicted, acquitted, conviction_percent)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """
+                cursor.execute(sql_conv, (report_id, year, decided, convicted, acquitted, conv_percent))
+                print("  - Inserted Conviction Stats")
+
+        # 5. Commit Transaction
+        conn.commit()
+        print(f"✅ DB Transaction Committed. Processed {processed_items} items.")
+        
+        # Update Log (simulated)
+        if hasattr(cursor, 'execute'):
+             # If you have a logs table you'd update it here
+             pass
+             
+        cursor.close()
+        conn.close()
+        return True
+
+    except Exception as e:
+        conn.rollback()
+        print(f"❌ DB Transaction Rolled Back. Error: {str(e)}")
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
+        return False
 
 def pdf_to_images(pdf_path, output_folder="temp_images"):
     """
@@ -61,19 +222,39 @@ def extract_pdf_content_with_gemini(image_paths, prompt=None):
     Returns:
         JSON response from Gemini
     """
-    # Default prompt if none provided
+    # Default prompt optimized for SQL Schema matching
     if prompt is None:
         prompt = """
-        Analyze this PDF page and extract all the information in a structured JSON format.
+        Analyze this PDF page (Police Crime Statistics) and extract data for database insertion.
         
-        Please provide:
-        1. Title/Header information
-        2. Tables (if any) with all rows and columns
-        3. Text content organized by sections
-        4. Any numerical data or statistics
-        5. Dates, locations, or other metadata
+        REQUIRED JSON STRUCTURE:
+        {
+          "crime_statistics": [
+            {
+              "crime_head": "Name of crime (e.g., Murder, Rape)",
+              "registered": 10,
+              "detected": 8,
+              "pending_0_3": 1,
+              "pending_3_6": 0,
+              "pending_6_12": 2,
+              "pending_1_year": 5
+            }
+          ],
+          "conviction_stats": {
+            "decided": 100,
+            "convicted": 60,
+            "acquitted": 40
+          },
+          "metadata": {
+            "year": 2024,
+            "month": 9
+          }
+        }
         
-        Return the response as valid JSON only, no additional text.
+        IMPORTANT:
+        - "crime_head" must match exact official names if possible.
+        - Ensure numeric values are integers (0 if missing).
+        - Return ONLY valid JSON.
         """
     
     all_results = []
@@ -175,12 +356,17 @@ def main():
     # PDF file path
     pdf_path = "bhandara sept-2-3.pdf"
     
+    # Mock parameters (In a real app, these would come from CLI args or API request)
+    REPORT_ID = 1  # Replace with actual report_upload_id
+    YEAR = 2024
+    MONTH = 9      # September
+    
     if not os.path.exists(pdf_path):
         print(f"Error: PDF file not found: {pdf_path}")
         return
     
     print("="*60)
-    print("PDF Content Extraction with Gemini Flash")
+    print("PDF Content Extraction with Gemini Flash + DB Insert")
     print("="*60)
     
     # Step 1: Convert PDF to images
@@ -203,15 +389,19 @@ def main():
     print(f"[SUCCESS] Extraction complete! Results saved to: {output_file}")
     print("="*60)
     
-    # Print summary
-    print(f"\nSummary:")
-    print(f"  - Total pages processed: {len(results)}")
-    successful = sum(1 for r in results if 'error' not in r)
-    print(f"  - Successfully extracted: {successful}")
-    if successful < len(results):
-        print(f"  - Failed: {len(results) - successful}")
+    # Step 4: Save to Database
+    print("\n" + "="*60)
+    print("Inserting data into Database...")
+    print("="*60)
     
-    # Step 4: Cleanup temporary images
+    db_success = save_to_database(REPORT_ID, results, YEAR, MONTH)
+    
+    if db_success:
+        print("\n✅ Database sync completed successfully!")
+    else:
+        print("\n⚠️ Database sync skipped or failed (check connection/credentials).")
+    
+    # Step 5: Cleanup temporary images
     cleanup_temp_images()
     
     print(f"\nYou can now view the extracted data in: {output_file}")

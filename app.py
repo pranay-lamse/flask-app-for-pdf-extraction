@@ -25,7 +25,7 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 # Get API key from environment variable
 GEMINI_API_KEY =  'AIzaSyDmruExS4O2OqNr_yBJXBzaUDv0pPDD1Cc'
-GEMINI_MODEL = os.environ.get('GEMINI_MODEL', 'gemini-2.5-flash')
+GEMINI_MODEL = 'gemini-2.5-flash'
 
 if GEMINI_API_KEY:
     print(f"✅ API Key loaded: {GEMINI_API_KEY[:5]}...{GEMINI_API_KEY[-4:]}")
@@ -310,4 +310,8 @@ def extract_pdf():
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    # Enable debug mode for auto-reloading
+    print("🚀 Starting Flask server in DEBUG mode...")
+    print(f"📂 Upload folder: {app.config['UPLOAD_FOLDER']}")
+    print(f"🔑 API Key configured: {bool(GEMINI_API_KEY)}")
+    app.run(host='0.0.0.0', port=port, debug=True)

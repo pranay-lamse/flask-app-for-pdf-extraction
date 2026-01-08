@@ -18,10 +18,12 @@ CORS(app)  # Enable CORS for Laravel API calls
 # Configuration
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
 app.config['UPLOAD_FOLDER'] = 'uploads'
+app.config['TEMP_IMAGES_FOLDER'] = 'temp_images'
 ALLOWED_EXTENSIONS = {'pdf'}
 
-# Create uploads folder
+# Create required folders
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+os.makedirs(app.config['TEMP_IMAGES_FOLDER'], exist_ok=True)
 
 # Gemini API Configuration
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -37,6 +39,22 @@ GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMI
 def allowed_file(filename):
     """Check if file extension is allowed"""
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def get_storage_path(filename):
+    """Generate organized storage path for PDF images"""
+    # Remove extension and sanitize filename
+    name_without_ext = os.path.splitext(filename)[0]
+    # Remove any special characters that might cause issues
+    sanitized_name = "".join(c if c.isalnum() or c in ('-', '_') else '_' for c in name_without_ext)
+    # Create timestamp
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    # Create folder name: {sanitized_filename}_{timestamp}
+    folder_name = f"{sanitized_name}_{timestamp}"
+    # Full path
+    storage_path = os.path.join(app.config['TEMP_IMAGES_FOLDER'], folder_name)
+    # Create directory
+    os.makedirs(storage_path, exist_ok=True)
+    return storage_path
 
 def pdf_to_images(pdf_path, output_folder):
     """Convert PDF pages to images"""
@@ -56,56 +74,69 @@ def encode_image_to_base64(image_path):
     with open(image_path, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode('utf-8')
 
+def get_dynamic_prompt():
+    return """
+    You are an expert data extraction AI. Extract the table data from the image into a clean JSON format.
+
+    ### CRITICAL TABLE ANALYSIS RULES:
+
+    1. **Detect Table Structure:**
+        - **Nested Columns:** If headers are stacked (e.g., "2023" over "Reg"), combine them into a single key (e.g., "2023_Reg").
+        - **Section Rows:** If a row acts as a title for the rows below it (e.g., a row saying only "Year 2022" followed by data rows), capture that text as a "section" or "year" field for the data rows.
+
+    2. **Row Extraction:**
+        - Extract every single data row.
+        - Use the column headers exactly as they appear in the image for JSON keys.
+        - If the table has a serial number (Sr. No), include it.
+
+    3. **Data Cleaning:**
+        - If a value is numeric, return it as a number (e.g., 7641, not "7641").
+        - If a value is a percentage, keep the string format (e.g., "47.00%").
+        - If a cell is empty or "-", return `null`.
+
+    ### OUTPUT FORMAT (Strict JSON):
+    Return ONLY a JSON object. No markdown.
+
+    Example for Row-based Sections (like Conviction Rate table):
+    {
+      "page_title": "Conviction Rate Status of Nagpur Rural",
+      "data": [
+        {
+          "sr_no": 1,
+          "district": "Nagpur (R)",
+          "section_year": "Year 2022",  <-- Extracted from the row separator
+          "decided": 7641,
+          "convicted": 3591,
+          "acquitted": 4050,
+          "conviction_percentage": "47.00%"
+        },
+        {
+          "sr_no": 2,
+          "district": "Nagpur (R)",
+          "section_year": "Year 2023",
+          "decided": 9546,
+          ...
+        }
+      ]
+    }
+
+    Example for Column-based Headers (like Crime Stats table):
+    {
+      "page_title": "Crime Part I to V",
+      "data": [
+        {
+          "head": "Murder",
+          "year_2023_reg": 58,
+          "year_2023_det": 56
+        }
+      ]
+    }
+    """
+
 def extract_pdf_content_streaming(image_paths, custom_prompt=None):
     """
     Generator function that yields page results as they are processed.
     Used for streaming endpoint.
-    """
-    # Crime statistics extraction prompt
-    crime_stats_prompt = """
-    You are an expert data extractor. Analyze the crime statistics table in this image.
-    
-    Extract the rows into a JSON list.
-    Review the table structure carefully. It often contains main headers and sub-headers (indented).
-    
-    IMPORTANT: For sub-headers (like 'Prof.', 'Technical.', 'Major', 'Minor'), you MUST combine them with their PARENT header to create a unique 'crime_head'.
-    Example Structure:
-    - Rape
-      - Minor
-      - Major
-    - Dacoity
-      - Prof.
-      - Technical.
-      
-    Extraction Output Should Be:
-    [
-      {"crime_head": "Rape", ...},
-      {"crime_head": "Rape - Minor", ...},
-      {"crime_head": "Rape - Major", ...},
-      {"crime_head": "Dacoity", ...},
-      {"crime_head": "Dacoity - Prof.", ...},
-      {"crime_head": "Dacoity - Technical.", ...}
-    ]
-    
-    If a row looks like a total or sub-total, include it.
-    
-    For each row, extract:
-    1. "crime_head": The full hierarchical name as described above (String).
-    2. "registered": The number of registered cases (Int). Look for columns like "Reg.", "Registered", or "Cases".
-    3. "detected": The number of detected cases (Int). Look for columns like "Det.", "Detected".
-    4. "pending_0_3": Pending cases 0-3 months (Int).
-    5. "pending_3_6": Pending cases 3-6 months (Int).
-    6. "pending_6_12": Pending cases 6-12 months (Int).
-    7. "pending_1_year": Pending cases > 1 year (Int).
-    
-    Also look for a "Conviction" table or section and extract:
-    - "conviction_stats": {
-        "decided": Int,
-        "convicted": Int,
-        "acquitted": Int
-    }
-    
-    Return ONLY valid JSON.
     """
     
     default_general_prompt = """
@@ -121,7 +152,7 @@ def extract_pdf_content_streaming(image_paths, custom_prompt=None):
     Return the response as valid JSON only, no additional text.
     """
     
-    prompt = custom_prompt if custom_prompt else crime_stats_prompt
+    prompt = custom_prompt if custom_prompt else get_dynamic_prompt()
     
     for idx, image_path in enumerate(image_paths):
         current_page_num = idx + 1
@@ -181,10 +212,9 @@ def extract_pdf_content_streaming(image_paths, custom_prompt=None):
                         
                         try:
                             result = json.loads(content)
-                            if isinstance(result, list):
-                                result = {"crime_statistics": result}
-                            elif "rows" in result:
-                                result["crime_statistics"] = result["rows"]
+                            
+                            # Keep result as-is for Laravel to handle
+                            # result contains 'category', 'rows', 'conviction_stats'
                             
                             result['type'] = 'page'
                             result['page_number'] = current_page_num
@@ -235,53 +265,6 @@ def extract_pdf_content_streaming(image_paths, custom_prompt=None):
 def extract_pdf_content_with_gemini(image_paths, custom_prompt=None):
     """Extract content from PDF images using Gemini API (non-streaming version)"""
     
-    # Crime statistics extraction prompt (optimized for crime report PDFs)
-    crime_stats_prompt = """
-    You are an expert data extractor. Analyze the crime statistics table in this image.
-    
-    Extract the rows into a JSON list.
-    Review the table structure carefully. It often contains main headers and sub-headers (indented).
-    
-    IMPORTANT: For sub-headers (like 'Prof.', 'Technical.', 'Major', 'Minor'), you MUST combine them with their PARENT header to create a unique 'crime_head'.
-    Example Structure:
-    - Rape
-      - Minor
-      - Major
-    - Dacoity
-      - Prof.
-      - Technical.
-      
-    Extraction Output Should Be:
-    [
-      {"crime_head": "Rape", ...},
-      {"crime_head": "Rape - Minor", ...},
-      {"crime_head": "Rape - Major", ...},
-      {"crime_head": "Dacoity", ...},
-      {"crime_head": "Dacoity - Prof.", ...},
-      {"crime_head": "Dacoity - Technical.", ...}
-    ]
-    
-    If a row looks like a total or sub-total, include it.
-    
-    For each row, extract:
-    1. "crime_head": The full hierarchical name as described above (String).
-    2. "registered": The number of registered cases (Int). Look for columns like "Reg.", "Registered", or "Cases".
-    3. "detected": The number of detected cases (Int). Look for columns like "Det.", "Detected".
-    4. "pending_0_3": Pending cases 0-3 months (Int).
-    5. "pending_3_6": Pending cases 3-6 months (Int).
-    6. "pending_6_12": Pending cases 6-12 months (Int).
-    7. "pending_1_year": Pending cases > 1 year (Int).
-    
-    Also look for a "Conviction" table or section and extract:
-    - "conviction_stats": {
-        "decided": Int,
-        "convicted": Int,
-        "acquitted": Int
-    }
-    
-    Return ONLY valid JSON.
-    """
-    
     # Default general extraction prompt
     default_general_prompt = """
     Analyze this PDF page and extract all the information in a structured JSON format.
@@ -296,8 +279,8 @@ def extract_pdf_content_with_gemini(image_paths, custom_prompt=None):
     Return the response as valid JSON only, no additional text.
     """
     
-    # Use custom prompt if provided, otherwise use crime stats prompt
-    prompt = custom_prompt if custom_prompt else crime_stats_prompt
+    # Use custom prompt if provided, otherwise use dynamic prompt
+    prompt = custom_prompt if custom_prompt else get_dynamic_prompt()
     
     all_results = []
     
@@ -341,11 +324,8 @@ def extract_pdf_content_with_gemini(image_paths, custom_prompt=None):
                     
                     try:
                         result = json.loads(content)
-                        # Ensure structure for crime stats
-                        if isinstance(result, list):
-                            result = {"crime_statistics": result}
-                        elif "rows" in result:
-                            result["crime_statistics"] = result["rows"]
+                        # Keep result as-is for Laravel to handle
+                        # result contains 'category', 'rows', 'conviction_stats'
                         
                         result['page_number'] = current_page_num
                         all_results.append(result)
@@ -406,14 +386,14 @@ def health():
 @app.route('/api/extract/stream', methods=['POST'])
 def extract_pdf_stream():
     """
-    STREAMING ENDPOINT - For Large PDFs (85+ pages)
+    STREAMING ENDPOINT - Process PDFs Page-by-Page
     
-    Sends JSON data page-by-page as they are processed.
-    Perfect for large PDFs to avoid timeout and show real-time progress.
+    Streams extraction results as they become available.
+    Recommended for large files to avoid timeouts, but works for PDFs of ANY size.
     
     Request (multipart/form-data):
         - file: PDF file (required)
-        - prompt: Optional custom extraction prompt
+        - prompt: Optional custom extraction prompt (overrides the default dynamic prompt)
     
     Response: Server-Sent Events (text/event-stream)
     Each event contains JSON for one processed page:
@@ -481,39 +461,37 @@ def extract_pdf_stream():
     
     def generate():
         try:
-            # Create temporary directory for image processing
-            import tempfile
-            with tempfile.TemporaryDirectory() as temp_dir:
-                # Convert PDF to images
-                image_folder = os.path.join(temp_dir, 'images')
-                os.makedirs(image_folder, exist_ok=True)
-                
-                # Use the already saved pdf_path
-                image_paths = pdf_to_images(pdf_path, image_folder)
-                
-                total_pages = len(image_paths)
-                print(f"🖼️  Converted to {total_pages} images")
-                
-                # Send start event
-                yield f"data: {json.dumps({'type': 'start', 'filename': filename, 'total_pages': total_pages})}\n\n"
-                
-                # Process each page and stream results
-                for result in extract_pdf_content_streaming(image_paths, custom_prompt):
-                    yield f"data: {json.dumps(result)}\n\n"
-                
-                # Send complete event
-                yield f"data: {json.dumps({'type': 'complete', 'total_processed': total_pages})}\n\n"
+            # Create persistent storage folder for images (organized by PDF name + timestamp)
+            image_folder = get_storage_path(filename)
+            print(f"📁 Storing images in: {image_folder}")
+            
+            # Convert PDF to images (images will be kept for debugging)
+            image_paths = pdf_to_images(pdf_path, image_folder)
+            
+            total_pages = len(image_paths)
+            print(f"🖼️  Converted to {total_pages} images (stored permanently)")
+            
+            # Send start event
+            yield f"data: {json.dumps({'type': 'start', 'filename': filename, 'total_pages': total_pages})}\n\n"
+            
+            # Process each page and stream results
+            for result in extract_pdf_content_streaming(image_paths, custom_prompt):
+                yield f"data: {json.dumps(result)}\n\n"
+            
+            # Send complete event
+            yield f"data: {json.dumps({'type': 'complete', 'total_processed': total_pages})}\n\n"
                 
         except Exception as e:
             print(f"❌ Error: {str(e)}")
             yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
         
         finally:
-            # Delete the uploaded PDF file
+            # Delete the uploaded PDF file (but keep images for debugging)
             if os.path.exists(pdf_path):
                 try:
                     os.remove(pdf_path)
                     print(f"♻️  Deleted temp PDF: {filename}", flush=True)
+                    print(f"✅ Images preserved in: {image_folder}", flush=True)
                 except Exception as e:
                     print(f"⚠️  Failed to delete temp PDF: {str(e)}", flush=True)
     
@@ -606,28 +584,28 @@ def extract_pdf():
         
         print(f"📥 Received PDF: {filename}")
         
-        # Create temporary directory for image processing
-        import tempfile
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Convert PDF to images
-            image_folder = os.path.join(temp_dir, 'images')
-            os.makedirs(image_folder, exist_ok=True)
-            image_paths = pdf_to_images(pdf_path, image_folder)
-            
-            print(f"🖼️  Converted to {len(image_paths)} images")
-            
-            # Extract content using Gemini
-            results = extract_pdf_content_with_gemini(image_paths, custom_prompt)
-            
-            print(f"✅ Extraction complete! Returning {len(results)} pages")
-            
-            # Return JSON response for Laravel
-            return jsonify({
-                'success': True,
-                'filename': filename,
-                'total_pages': len(results),
-                'data': results
-            })
+        # Create persistent storage folder for images (organized by PDF name + timestamp)
+        image_folder = get_storage_path(filename)
+        print(f"📁 Storing images in: {image_folder}")
+        
+        # Convert PDF to images (images will be kept for debugging)
+        image_paths = pdf_to_images(pdf_path, image_folder)
+        
+        print(f"🖼️  Converted to {len(image_paths)} images (stored permanently)")
+        
+        # Extract content using Gemini
+        results = extract_pdf_content_with_gemini(image_paths, custom_prompt)
+        
+        print(f"✅ Extraction complete! Returning {len(results)} pages")
+        print(f"✅ Images preserved in: {image_folder}")
+        
+        # Return JSON response for Laravel
+        return jsonify({
+            'success': True,
+            'filename': filename,
+            'total_pages': len(results),
+            'data': results
+        })
             
     except Exception as e:
         print(f"❌ Error: {str(e)}")

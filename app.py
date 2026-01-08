@@ -40,7 +40,8 @@ def allowed_file(filename):
 
 def pdf_to_images(pdf_path, output_folder):
     """Convert PDF pages to images"""
-    images = convert_from_path(pdf_path, dpi=300)
+    # Reduced DPI from 300 to 200 for faster processing/upload
+    images = convert_from_path(pdf_path, dpi=200)
     image_paths = []
     
     for i, image in enumerate(images):
@@ -160,7 +161,7 @@ def extract_pdf_content_streaming(image_paths, custom_prompt=None):
                     GEMINI_API_URL,
                     headers={"Content-Type": "application/json"},
                     json=payload,
-                    timeout=60
+                    timeout=120
                 )
                 
                 # Handle 503 (Overloaded) and 429 (Rate Limit) errors
@@ -329,7 +330,7 @@ def extract_pdf_content_with_gemini(image_paths, custom_prompt=None):
                 GEMINI_API_URL,
                 headers={"Content-Type": "application/json"},
                 json=payload,
-                timeout=60
+                timeout=120
             )
             
             if response.status_code == 200:

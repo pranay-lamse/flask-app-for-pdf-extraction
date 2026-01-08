@@ -124,84 +124,112 @@ def extract_pdf_content_streaming(image_paths, custom_prompt=None):
     
     for idx, image_path in enumerate(image_paths):
         current_page_num = idx + 1
-        print(f"📄 Processing page {current_page_num}/{len(image_paths)}...")
+        print(f"📄 Processing page {current_page_num}/{len(image_paths)}...", flush=True)
         
-        try:
-            image_base64 = encode_image_to_base64(image_path)
-            
-            payload = {
-                "contents": [{
-                    "parts": [
-                        {"text": prompt},
-                        {
-                            "inline_data": {
-                                "mime_type": "image/png",
-                                "data": image_base64
-                            }
-                        }
-                    ]
-                }],
-                "generationConfig": {
-                    "temperature": 0.1,
-                    "responseMimeType": "application/json"
-                }
-            }
-            
-            response = requests.post(
-                GEMINI_API_URL,
-                headers={"Content-Type": "application/json"},
-                json=payload,
-                timeout=60
-            )
-            
-            if response.status_code == 200:
-                response_data = response.json()
+        
+        # Retry configuration
+        max_retries = 3
+        retry_delay = 2  # Start with 2 seconds
+        
+        for attempt in range(max_retries + 1):
+            try:
+                image_base64 = encode_image_to_base64(image_path)
                 
-                if 'candidates' in response_data and len(response_data['candidates']) > 0:
-                    content = response_data['candidates'][0]['content']['parts'][0]['text']
+                payload = {
+                    "contents": [{
+                        "parts": [
+                            {"text": prompt},
+                            {
+                                "inline_data": {
+                                    "mime_type": "image/png",
+                                    "data": image_base64
+                                }
+                            }
+                        ]
+                    }],
+                    "generationConfig": {
+                        "temperature": 0.1,
+                        "responseMimeType": "application/json"
+                    }
+                }
+                
+                if attempt > 0:
+                    print(f"   🔄 Retry attempt {attempt}/{max_retries} for page {current_page_num}...", flush=True)
+                
+                response = requests.post(
+                    GEMINI_API_URL,
+                    headers={"Content-Type": "application/json"},
+                    json=payload,
+                    timeout=60
+                )
+                
+                # Handle 503 (Overloaded) and 429 (Rate Limit) errors
+                if response.status_code in [503, 529, 429]:
+                    if attempt < max_retries:
+                        print(f"   ⏳ High traffic (Status {response.status_code}). Retrying in {retry_delay}s...", flush=True)
+                        import time
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # Exponential backoff
+                        continue
+                
+                if response.status_code == 200:
+                    response_data = response.json()
                     
-                    try:
-                        result = json.loads(content)
-                        if isinstance(result, list):
-                            result = {"crime_statistics": result}
-                        elif "rows" in result:
-                            result["crime_statistics"] = result["rows"]
+                    if 'candidates' in response_data and len(response_data['candidates']) > 0:
+                        content = response_data['candidates'][0]['content']['parts'][0]['text']
                         
-                        result['type'] = 'page'
-                        result['page_number'] = current_page_num
-                        print(f"   ✅ Page {current_page_num} extracted successfully")
-                        yield result
+                        try:
+                            result = json.loads(content)
+                            if isinstance(result, list):
+                                result = {"crime_statistics": result}
+                            elif "rows" in result:
+                                result["crime_statistics"] = result["rows"]
                             
-                    except json.JSONDecodeError:
-                        print(f"   ⚠️  Failed to parse JSON from page {current_page_num}")
+                            result['type'] = 'page'
+                            result['page_number'] = current_page_num
+                            print(f"   ✅ Page {current_page_num} extracted successfully", flush=True)
+                            yield result
+                            break # Success - exit retry loop
+                                
+                        except json.JSONDecodeError:
+                            print(f"   ⚠️  Failed to parse JSON from page {current_page_num}", flush=True)
+                            yield {
+                                'type': 'page',
+                                'page_number': current_page_num,
+                                'raw_response': content,
+                                'error': 'JSON parsing failed'
+                            }
+                            break # Don't retry parsing errors
+                    else:
+                        print(f"   ❌ Page {current_page_num}: No valid response from API. Response: {str(response_data)[:200]}", flush=True)
                         yield {
                             'type': 'page',
                             'page_number': current_page_num,
-                            'raw_response': content,
-                            'error': 'JSON parsing failed'
+                            'error': 'No valid response from API'
                         }
+                        break # Don't retry if response is valid but empty
                 else:
+                    error_msg = response.json() if response.text else {"error": "Unknown error"}
+                    print(f"   ❌ Page {current_page_num}: API request failed: {response.status_code}. Error: {error_msg}", flush=True)
+                    
+                    # If it's a fatal error (not 503/429) or last retry failed
+                    if attempt == max_retries:
+                        yield {
+                            'type': 'page',
+                            'page_number': current_page_num,
+                            'error': f'API request failed: {response.status_code}',
+                            'error_details': error_msg
+                        }
+                    # If 503/429, loop will retry naturally
+                    
+            except Exception as e:
+                print(f"   ❌ Error processing page {current_page_num}: {str(e)}", flush=True)
+                if attempt == max_retries:
                     yield {
                         'type': 'page',
                         'page_number': current_page_num,
-                        'error': 'No valid response from API'
+                        'error': str(e)
                     }
-            else:
-                error_msg = response.json() if response.text else {"error": "Unknown error"}
-                yield {
-                    'type': 'page',
-                    'page_number': current_page_num,
-                    'error': f'API request failed: {response.status_code}',
-                    'error_details': error_msg
-                }
-                
-        except Exception as e:
-            print(f"   ❌ Error processing page {current_page_num}: {str(e)}")
-            yield {
-                'type': 'page',
-                'page_number': current_page_num,
-                'error': str(e)
-            }
 
 def extract_pdf_content_with_gemini(image_paths, custom_prompt=None):
     """Extract content from PDF images using Gemini API (non-streaming version)"""
@@ -430,28 +458,36 @@ def extract_pdf_stream():
     # Get optional custom prompt
     custom_prompt = request.form.get('prompt', None)
     
+    # Save file IMMEDIATELY before streaming starts
+    try:
+        filename = secure_filename(file.filename)
+        
+        # Add timestamp if file already exists
+        if os.path.exists(os.path.join(app.config['UPLOAD_FOLDER'], filename)):
+            name, ext = os.path.splitext(filename)
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename = f"{name}_{timestamp}{ext}"
+        
+        pdf_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        file.save(pdf_path)
+        print(f"📥 Saved PDF: {filename}")
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'Failed to save file: {str(e)}'
+        }), 500
+    
     def generate():
         try:
-            # Save uploaded PDF
-            filename = secure_filename(file.filename)
-            
-            # Add timestamp if file already exists
-            if os.path.exists(os.path.join(app.config['UPLOAD_FOLDER'], filename)):
-                name, ext = os.path.splitext(filename)
-                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                filename = f"{name}_{timestamp}{ext}"
-            
-            pdf_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-            file.save(pdf_path)
-            
-            print(f"📥 Received PDF: {filename}")
-            
             # Create temporary directory for image processing
             import tempfile
             with tempfile.TemporaryDirectory() as temp_dir:
                 # Convert PDF to images
                 image_folder = os.path.join(temp_dir, 'images')
                 os.makedirs(image_folder, exist_ok=True)
+                
+                # Use the already saved pdf_path
                 image_paths = pdf_to_images(pdf_path, image_folder)
                 
                 total_pages = len(image_paths)
@@ -470,6 +506,15 @@ def extract_pdf_stream():
         except Exception as e:
             print(f"❌ Error: {str(e)}")
             yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+        
+        finally:
+            # Delete the uploaded PDF file
+            if os.path.exists(pdf_path):
+                try:
+                    os.remove(pdf_path)
+                    print(f"♻️  Deleted temp PDF: {filename}", flush=True)
+                except Exception as e:
+                    print(f"⚠️  Failed to delete temp PDF: {str(e)}", flush=True)
     
     return Response(stream_with_context(generate()), mimetype='text/event-stream')
 
@@ -589,6 +634,15 @@ def extract_pdf():
             'success': False,
             'error': f'Processing failed: {str(e)}'
         }), 500
+    
+    finally:
+        # Delete the uploaded PDF file
+        if 'pdf_path' in locals() and os.path.exists(pdf_path):
+            try:
+                os.remove(pdf_path)
+                print(f"♻️  Deleted temp PDF: {filename}")
+            except Exception as e:
+                print(f"⚠️  Failed to delete temp PDF: {str(e)}")
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
